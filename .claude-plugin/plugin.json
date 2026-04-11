@@ -1,0 +1,7 @@
+{
+  "name": "uccello-hub-development",
+  "description": "Skill for interacting with the Uccello Hub REST API — handles CRUD operations, schema discovery, and enforces the no-local-migration rule for business data",
+  "author": {
+    "name": "Jonathan"
+  }
+}
