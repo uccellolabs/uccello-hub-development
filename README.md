@@ -9,7 +9,7 @@ When installed, Claude automatically activates this skill whenever you work with
 ## Installation
 
 ```bash
-claude plugin install github:YOUR_USERNAME/uccello-hub-development
+claude plugin install github:uccellolabs/uccello-hub-development
 ```
 
 Or add it to your project's plugin configuration.
