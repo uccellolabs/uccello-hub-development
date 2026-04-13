@@ -13,6 +13,8 @@ Uccello Hub is the single source of truth for all business data in this applicat
 
 **Never create local database migrations for business data.** Sessions, jobs, cache, and other framework technical tables are the only exceptions. All business entities live in Uccello Hub.
 
+When a new table or column is needed, write an **Uccello Hub migration** — a standard Laravel migration file whose `up()` and `down()` methods call the Uccello Hub Schema API instead of `Schema::create()`.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -41,6 +43,17 @@ X-Api-Key: {UCCELLO_HUB_API_KEY}
 
 ## API Conventions
 
+### Schema Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/schema` | List all available tables |
+| `POST` | `/api/v1/schema/tables` | Create a new custom table |
+| `PUT` | `/api/v1/schema/tables/{slug}` | Update a custom table |
+| `DELETE` | `/api/v1/schema/tables/{slug}` | Delete a custom table |
+
+### Data CRUD
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/{slug}` | List records |
@@ -48,7 +61,6 @@ X-Api-Key: {UCCELLO_HUB_API_KEY}
 | `GET` | `/api/v1/{slug}/{ulid}` | Get a single record |
 | `PUT` | `/api/v1/{slug}/{ulid}` | Update a record |
 | `DELETE` | `/api/v1/{slug}/{ulid}` | Delete a record |
-| `GET` | `/api/v1/schema` | List all available tables |
 
 ### List Parameters
 
@@ -72,11 +84,150 @@ Relational fields accept a **ULID** string, not a nested object:
 
 All records use **ULIDs** as their primary identifier. Never assume integer IDs.
 
-## Workflow: Adding a New Data Structure
+## Schema API — Column Types & Payloads
 
-1. Call `GET /api/v1/schema` to check if a suitable table already exists.
-2. If none exists, create a new custom table via the Uccello Hub admin or API under the correct team/workspace.
-3. Interact with it exclusively through the REST API — never create a local migration.
+### Column properties
+
+| Property | Required | Description |
+|----------|----------|-------------|
+| `name` | yes | Display name |
+| `type` | yes | See types below |
+| `required` | no | `true`/`false` (default `false`) |
+| `options` | no | Type-specific options (see below) |
+| `id` | PUT only | UUID of the existing column |
+
+### Available types
+
+| Type | `options` |
+|------|-----------|
+| `text` | — |
+| `number` | — |
+| `date` | — |
+| `file` | — |
+| `select` | `choices: string[]` |
+| `relation` | `to_table_id`, `display_column_slug` |
+| `formula` | `expression` (max 2000 chars) |
+
+### POST payload — create table
+
+The slug is **auto-generated** from `name`. Do not send a `slug` field.
+
+```json
+{
+  "name": "Contacts",
+  "columns": [
+    { "name": "First Name", "type": "text",     "required": true },
+    { "name": "Age",        "type": "number" },
+    { "name": "Status",     "type": "select",   "options": { "choices": ["active", "inactive"] } },
+    { "name": "Birth Date", "type": "date" },
+    { "name": "Avatar",     "type": "file" },
+    { "name": "Company",    "type": "relation", "options": { "to_table_id": "<uuid>", "display_column_slug": "name" } },
+    { "name": "Full Name",  "type": "formula",  "options": { "expression": "first_name || ' ' || last_name" } }
+  ]
+}
+```
+
+### PUT payload — update table
+
+- `name` is **not modifiable**.
+- Existing columns **must include their `id`** (UUID); omitting `id` creates a new column.
+- Columns **absent from the payload are deleted**.
+- The array order sets the display order.
+- The **type of an existing column cannot be changed** (API returns 422).
+
+```json
+{
+  "columns": [
+    { "id": "existing-uuid", "name": "First Name", "type": "text", "required": true },
+    { "name": "Phone",       "type": "text" }
+  ]
+}
+```
+
+## Uccello Hub Migrations
+
+Instead of using `Schema::create()` or `Schema::table()`, write migration files that call the Uccello Hub Schema API. Place them in `database/migrations/` like any Laravel migration.
+
+### Pattern 1 — Create a new table
+
+```php
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\Http;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Http::uccelloHub()->post('/api/v1/schema/tables', [
+            'name'    => 'Contacts',
+            'columns' => [
+                ['name' => 'First Name', 'type' => 'text', 'required' => true],
+                ['name' => 'Email',      'type' => 'text'],
+                ['name' => 'Status',     'type' => 'select', 'options' => ['choices' => ['active', 'inactive']]],
+                ['name' => 'Company',    'type' => 'relation', 'options' => ['to_table_id' => '<companies-table-uuid>', 'display_column_slug' => 'name']],
+            ],
+        ])->throw();
+    }
+
+    public function down(): void
+    {
+        Http::uccelloHub()->delete('/api/v1/schema/tables/contacts')->throw();
+    }
+};
+```
+
+### Pattern 2 — Add columns to an existing table
+
+When adding columns, `up()` sends the full column list (existing + new). `down()` restores the previous state by sending only the columns that existed before.
+
+Existing columns **must include their UUID** (`id`). Fetch these from `GET /api/v1/schema` before writing the migration.
+
+```php
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\Http;
+
+return new class extends Migration
+{
+    // Snapshot of columns that existed BEFORE this migration.
+    // Each entry must include the UUID returned by Uccello Hub.
+    private array $existingColumns = [
+        ['id' => 'uuid-first-name', 'name' => 'First Name', 'type' => 'text', 'required' => true],
+        ['id' => 'uuid-email',      'name' => 'Email',       'type' => 'text'],
+        ['id' => 'uuid-status',     'name' => 'Status',      'type' => 'select', 'options' => ['choices' => ['active', 'inactive']]],
+    ];
+
+    public function up(): void
+    {
+        Http::uccelloHub()->put('/api/v1/schema/tables/contacts', [
+            'columns' => [
+                ...$this->existingColumns,
+                ['name' => 'Phone',      'type' => 'text'],
+                ['name' => 'Birth Date', 'type' => 'date'],
+            ],
+        ])->throw();
+    }
+
+    public function down(): void
+    {
+        // Restoring $existingColumns drops the columns added in up().
+        Http::uccelloHub()->put('/api/v1/schema/tables/contacts', [
+            'columns' => $this->existingColumns,
+        ])->throw();
+    }
+};
+```
+
+### Workflow: Adding a New Data Structure
+
+1. Call `GET /api/v1/schema` to check whether a suitable table already exists.
+2. If not, write a **create table** migration (Pattern 1 above).
+3. If the table exists but is missing columns, write an **add columns** migration (Pattern 2 above), using the column UUIDs from `GET /api/v1/schema`.
+4. Run `php artisan migrate` — the migration calls the Uccello Hub API; no local schema is touched.
+5. Interact with the table exclusively through the data CRUD endpoints.
 
 ## Laravel HTTP Client Pattern
 
@@ -140,8 +291,12 @@ if ($response->failed()) {
 
 ## Common Pitfalls
 
-- Sending an `id` field in POST bodies — the API assigns the ULID automatically; omit it.
+- Using `Schema::create()` or `Schema::table()` for business data — always use Uccello Hub migrations instead.
+- Sending a `slug` field in a POST payload — the slug is auto-generated from `name`; omit it.
+- Omitting column `id` UUIDs in a PUT payload — existing columns without an `id` are treated as new columns.
+- Attempting to change a column's `type` via PUT — the API returns 422; type changes require a new column.
+- Sending an `id` field in data POST bodies — the API assigns the ULID automatically; omit it.
 - Using integer IDs instead of ULIDs for relational fields.
 - Reading `UCCELLO_HUB_URL` / `UCCELLO_HUB_API_KEY` directly with `env()` outside config files — always go through `config()`.
-- Forgetting to check if a table already exists in the schema before requesting a new one.
+- Forgetting to check if a table already exists in the schema before creating a new one.
 - Creating a local Eloquent model or migration for a business entity.
